@@ -1,0 +1,245 @@
+library(ISLR2)
+library(tidyverse)
+library(ggplot2)
+library(glmnet)
+
+# Ladda in data
+data("Credit")
+# Titta snabbt på strukturen
+str(Credit)
+
+
+## 1. Datahantering --------------------------------------------------------
+
+# Ta bort observationer med Balance = 0 (irrelevanta för studien)
+creditno0 <- subset(Credit, Balance > 0)
+
+# Logaritmera Income för att jämna ut fördelningen
+creditno0$Income_log <- log(creditno0$Income)
+
+# Kontrollera att vi har 310 obs (400 - 90 nollor)
+nrow(Credit)      # 400
+nrow(creditno0)   # 310 bör det vara
+
+
+## 2. Visualiseringar (Graf 1–6) ------------------------------------------
+
+## Graf 1: översiktlig plot av alla variabler (originaldata)
+plot(Credit)   # scatterplot-matris / diagnostik
+
+## Graf 2: Balance mot Income (med nollor kvar, som i rapporten)
+Credit %>%
+  ggplot(aes(x = Income, y = Balance)) +
+  geom_point(alpha = 0.6, colour = "blue") +
+  labs(
+    y = "Genomsnittlig kreditkortsbalans",
+    x = "Inkomst"
+  )
+
+## Graf 3: histogram över Income (efter borttagning av Balance = 0)
+creditno0 %>%
+  ggplot(aes(x = Income)) +
+  geom_histogram(
+    binwidth = 4,
+    alpha = 0.6,
+    fill = "blue"
+  ) +
+  labs(
+    title = "Inkomstfördelning",
+    subtitle = "Räknat i 1 000's $",
+    y = "Observationer",
+    x = "Income"
+  )
+
+## Graf 4: histogram över log(Income)
+creditno0 %>%
+  ggplot(aes(x = Income_log)) +
+  geom_histogram(
+    binwidth = 0.045,
+    alpha = 0.6,
+    fill = "blue"
+  ) +
+  labs(
+    title = "Inkomstfördelning",
+    subtitle = "Logaritmerad",
+    x = "Income_log",
+    y = "Count"
+  )
+
+## Graf 5: Income_log-fördelning efter Student (violin + boxplot)
+creditno0 %>%
+  ggplot(aes(x = Student, y = Income_log, fill = Student)) +
+  geom_violin(show.legend = FALSE) +
+  geom_boxplot(show.legend = FALSE, width = 0.3) +
+  labs(
+    title = "Inkomstfördelning, student ja/nej",
+    x = "Student",
+    y = "Income_log"
+  )
+
+## Graf 6: Balance-fördelning efter Student (violin + boxplot)
+creditno0 %>%
+  ggplot(aes(x = Student, y = Balance, fill = Student)) +
+  geom_violin(show.legend = FALSE) +
+  geom_boxplot(show.legend = FALSE, width = 0.3) +
+  labs(
+    title = "Kreditkortsbalanse bland studerande och icke studerande",
+    subtitle = "Genomsnittligen räknat i $",
+    x = "Student",
+    y = "Balance"
+  )
+
+
+## 3. Regressionsmodeller (Regression 1 & 2) -------------------------------
+
+# Se till att kategorivariabler är faktorer (om de inte redan är det)
+creditno0 <- creditno0 %>%
+  mutate(
+    Student = factor(Student),
+    Married = factor(Married),
+    # Om ditt dataset har Own/Region som i rapporten:
+    # Own    = factor(Own),
+    # Region = factor(Region)
+  )
+
+### Regression 1: alla oberoende variabler -------------------
+# Som i rapporten: Balance ~ Income_log + övriga X
+reg1 <- lm(
+  Balance ~ Income_log + Limit + Rating + Cards +
+    Age + Education + Student + Married,
+  data = creditno0
+  # lägg ev. till Own + Region om de finns i ditt data:
+  # + Own + Region
+)
+
+summary(reg1)
+
+### Regression 2: endast signifikanta variabler ---------------
+# Enligt rapporten: Income_log, Limit, Cards, Age, Student
+reg2 <- lm(
+  Balance ~ Income_log + Limit + Cards + Age + Student,
+  data = creditno0
+)
+
+summary(reg2)
+
+
+## 4. Train/Test-split för prediktion (OLS, Ridge, LASSO) ------------------
+
+set.seed(32424)  # samma seed som i rapporten
+
+# Slumpa hälften till träning
+train_idx <- sample(1:nrow(creditno0), nrow(creditno0) / 2)
+test_idx  <- setdiff(1:nrow(creditno0), train_idx)
+
+# Målvariabel
+y_train <- creditno0[train_idx, "Balance"]
+y_test  <- creditno0[test_idx,  "Balance"]
+
+# Liten modell med de variabler som ingår i Regression 2
+small <- creditno0[, c("Balance", "Income_log", "Limit", "Cards", "Age", "Student")]
+
+# Skapa designmatriser via model.matrix (tar hand om faktorer åt oss)
+small_train <- data.frame(
+  y_train,
+  model.matrix(Balance ~ ., data = small[train_idx, ])[ , -1]  # ta bort intercept-kolumnen
+)
+
+x_small_train <- as.matrix(small_train[ , -1])                  # bara X
+x_small_test  <- model.matrix(Balance ~ ., data = small[test_idx, ])[ , -1]
+
+dim(small_train)
+dim(x_small_test)
+
+## Hjälpfunktioner för felmått ---------------------------------------------
+rmse  <- function(pred, obs) sqrt(mean((pred - obs)^2))
+rmspe <- function(pred, obs) sqrt(mean(((pred - obs) / obs)^2)) * 100
+
+
+## 4.1 OLS (vanlig linjär regression) --------------------------------------
+
+ols_mod <- lm(y_train ~ ., data = small_train)
+summary(ols_mod)
+
+ols_pred <- predict(ols_mod, newdata = as.data.frame(x_small_test))
+
+rmse_ols  <- rmse(ols_pred,  y_test)
+rmspe_ols <- rmspe(ols_pred, y_test)
+
+rmse_ols
+rmspe_ols   # ska ligga runt 129 % enligt rapporten
+
+
+## 4.2 Ridge regression ----------------------------------------------------
+
+# alpha = 0 ger ridge
+ridge_mod <- glmnet(x_small_train, y_train, alpha = 0)
+
+# Graf 7: koefficientbanor för Ridge
+plot(ridge_mod)
+
+set.seed(32424)
+cv_ridge <- cv.glmnet(x_small_train, y_train, alpha = 0)
+
+# Graf 8: CV-kurva (MSE mot log(lambda))
+plot(cv_ridge)
+
+ridge_lambda <- cv_ridge$lambda.min
+
+ridge_pred <- predict(ridge_mod,
+                      s   = ridge_lambda,
+                      newx = x_small_test)
+
+ridge_coef <- predict(ridge_mod,
+                      type = "coefficients",
+                      s    = ridge_lambda)
+
+ridge_coef
+
+rmse_ridge  <- rmse(ridge_pred,  y_test)
+rmspe_ridge <- rmspe(ridge_pred, y_test)
+
+rmse_ridge
+rmspe_ridge   # runt 150 % enligt rapporten
+
+
+## 4.3 LASSO regression ----------------------------------------------------
+
+# alpha = 1 ger LASSO
+lasso_mod <- glmnet(x_small_train, y_train, alpha = 1)
+
+# Graf 9: koefficientbanor för LASSO
+plot(lasso_mod)
+
+set.seed(32424)
+cv_lasso <- cv.glmnet(x_small_train, y_train, alpha = 1)
+
+# Graf 10: CV-kurva för LASSO
+plot(cv_lasso)
+
+lasso_lambda <- cv_lasso$lambda.min
+
+lasso_pred <- predict(lasso_mod,
+                      s   = lasso_lambda,
+                      newx = x_small_test)
+
+lasso_coef <- predict(lasso_mod,
+                      type = "coefficients",
+                      s    = lasso_lambda)
+
+lasso_coef
+
+rmse_lasso  <- rmse(lasso_pred,  y_test)
+rmspe_lasso <- rmspe(lasso_pred, y_test)
+
+rmse_lasso
+rmspe_lasso   # runt 129.3 % enligt rapporten
+
+
+## 5. Sammanfattning av prediktiv prestanda --------------------------------
+
+data.frame(
+  Modell = c("OLS", "Ridge", "LASSO"),
+  RMSE   = c(rmse_ols, rmse_ridge, rmse_lasso),
+  rMSPE  = c(rmspe_ols, rmspe_ridge, rmspe_lasso)
+)
