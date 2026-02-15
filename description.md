@@ -1,0 +1,1 @@
+Predictive regression analysis of credit card balances using OLS, Ridge, and LASSO models with financial and demographic variables.
